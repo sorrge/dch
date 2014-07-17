@@ -1,0 +1,1 @@
+@java -Xmx50M -jar target\dch-0.2-jar-with-dependencies.jar
