@@ -51,8 +51,6 @@ import org.nyan.dch.posts.Storage;
  */
 public class LANChat
 {
-
-  
   static class ReceiveReporter implements IPostAddedListener
   {
     private final DateFormat format = new SimpleDateFormat("HH:mm:ss");    
@@ -60,7 +58,14 @@ public class LANChat
     @Override
     public void PostAdded(Post post)
     {
-      System.out.printf("[%s]\t%s\n", format.format(post.GetSentAt()), post.GetBody());
+      PrintWriter writer = null;
+      if(System.console() != null && System.console().writer() != null)
+        writer = System.console().writer();
+      
+      if(writer == null)
+        System.out.printf("[%s]\t%s\n", format.format(post.GetSentAt()), post.GetBody());
+      else
+        writer.printf("[%s]\t%s\n", format.format(post.GetSentAt()), post.GetBody());
     }
   }
   
