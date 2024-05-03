@@ -1,0 +1,66 @@
+body, html {
+    height: 100%;
+    margin: 0;
+    font-family: Arial, sans-serif;
+    background: #FFFFEE;
+}
+
+#chat-container {
+    /* height: 100%; */
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start; /* Aligns items to the start of the flex container, not stretching them */
+    justify-content: space-between;
+    padding: 20px;
+    background: #FFFFEE;
+    box-sizing: border-box; /* Ensures padding is included in the height */
+}
+
+
+.post {
+    background: #F0E0D6;
+    color: #800000;
+    overflow-wrap: break-word;
+    word-break: break-word; /* Optional, for additional control if overflow-wrap isn't enough */
+    padding-left: 10px;
+    padding-right: 10px;
+    padding-top: 3px;
+    margin: 3px;
+    display: inline-block; /* Makes the div width as per the content inside */
+}
+
+
+.author {
+    color: #117743;
+    font-weight: 800;
+}
+
+
+.time {
+    padding-left: 5px;
+}
+
+
+.content {
+    padding-left: 30px;
+    padding-right: 30px;
+}
+
+
+#message-input {
+    padding: 10px;
+    font-size: 16px;
+    border: 1px solid #ddd;
+    margin: 3px;
+    width: calc(100% - 6px); /* Adjust the total pixel reduction based on padding, border, and margin */
+    box-sizing: border-box; /* Ensures padding is included in the height */
+}
+
+
+.logo {
+    clear: both;
+    text-align: center;
+    font-size: 2em;
+    color: #800000;
+    width: 100%;
+}
