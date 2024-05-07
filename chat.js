@@ -1,134 +1,142 @@
-const net = new DchNet();
+import {DchNet} from "./network.js";
+import {PostsStorage} from "./posts-storage.js";
+import * as safeNodes from "./nkn_safe_nodes.js";
+
+
+var net = null;
 const postsStorage = new PostsStorage();
-
-
-async function generateSHA256Hash(input) {
-    const encoder = new TextEncoder();
-    const data = encoder.encode(input);
-    const hashBuffer = await crypto.subtle.digest("SHA-256", data);
-    const hashArray = Array.from(new Uint8Array(hashBuffer));
-    const hashHex = hashArray.map(byte => byte.toString(16).padStart(2, "0")).join("");
-    return hashHex;
-}
-
-
-const timeStampLength = 20;
-function getFixedWidthTimestamp() {
-    const timestamp = Date.now();  // Get current timestamp in milliseconds
-    const fixedWidthTimestamp = timestamp.toString().padStart(timeStampLength, '0');
-    return fixedWidthTimestamp;
-}
-
-
-function isTimestampValid(timestamp) {
-    return timestamp.length === timeStampLength && !isNaN(Number(timestamp)) && new Date(Number(timestamp)) !== "Invalid Date";
-}
 
 
 async function messageReceivedCallback(message) {
     if(message.payload.length > PostsStorage.maxPostLength)
         return;
 
-    const command = message.payload.substring(0, 4);
-    if(command === "POST") {
-        const timestamp = message.payload.substring(4, 4 + timeStampLength);
-        if(message.payload.substring(4 + timeStampLength, 4 + timeStampLength + 1) !== "|" || !isTimestampValid(timestamp)) {
-            console.log("Invalid POST message from " + message.src + ": " + message.payload);
-            return;
-        }
-
-        const id = await generateSHA256Hash(message.payload.substring(4));
-        const post = {
-            src: message.src,
-            text: message.payload.substring(4 + timeStampLength + 1),
-            id: id,
-            timestamp: timestamp,
-            authorName: "Frieren"
-        };
-
+    const msgData = JSON.parse(message.payload);    
+    if(msgData.command === "POST") {
+        const post = msgData.post;
         postsStorage.addPost(post);
     }
-    else if(command === "UPDT") {
-        console.log("UPDT command received from " + message.src);
-        const timestamp = message.payload.substring(4);
+    else if(msgData.command === "UPDATE") {
+        console.log("UPDATE command received from " + message.src);
+        const timestamp = msgData.timestamp;
         const posts = postsStorage.getPostsAfter(timestamp);
-        try {
-            if(posts.length > 0)
-                console.log("Sending " + posts.length + " posts to " + message.src);
+        if(posts.length > 0) {
+            console.log("Sending " + posts.length + " posts to " + message.src);
 
+            const promises = [];
             for(const post of posts) {
-                net.client.send(message.src, "POST" + post.timestamp + "|" + post.text);
+                const reply = JSON.stringify({command: "POST", post: {text: post.text, timestamp: post.timestamp}});
+                promises.push(net.client.sendReply(message.src, message.dest, reply));
             }
+
+            await Promise.all(promises).catch(e => console.log("Failed to send posts to " + message.src));
         }
-        catch(e) {
-            console.log("Failed to send posts to " + message.src);
+        else if(msgData.numPosts < postsStorage.posts.size) {
+            console.log(`${message.src} is missing some posts. Asking for sync...`);
+            await net.client.sendReply(message.src, message.dest, JSON.stringify({command: "SEND-SYNC"}));
         }
     }
-    else if(command === "SYNC") {
+    else if(msgData.command === "SYNC") {
         console.log("SYNC command received from " + message.src);
-        const ids = message.payload.substring(4);
-        if(ids.length % 64 !== 0) {
-            console.log("Invalid SYNC message from " + message.src);
-            return;
+        const existingIds = new Set(msgData.ids);
+
+        const promises = [];
+        for(const id of postsStorage.getAllIds()) {
+            if(existingIds.has(id))
+                continue;
+
+            const post = postsStorage.getById(id);
+            const reply = JSON.stringify({command: "POST", post: {text: post.text, timestamp: post.timestamp}});
+            promises.push(net.client.sendReply(message.src, message.dest, reply));
         }
 
-        const existingIds = new Set(ids.match(/.{64}/g));
+        if(promises.length > 0)
+            console.log("Sending " + promises.length + " posts to " + message.src);
 
-        try {
-            for(const id of postsStorage.getAllIds()) {
-                if(existingIds.has(id))
-                    continue;
+        await Promise.all(promises).catch(e => console.log("Failed to send posts to " + message.src));
 
-                const post = postsStorage.getById(id);
-                // console.log("Sending post to " + message.src + ": " + post.text);
-                net.client.send(message.src, "POST" + post.timestamp + "|" + post.text);
-            }
+        const missingIds = msgData.ids.filter(id => !postsStorage.posts.exists(id));
+        if(missingIds.length > 0) {
+            console.log("Missing " + missingIds.length + " posts from " + message.src + ". Sending SYNC request...");
+            await net.client.sendReply(message.src, message.dest, JSON.stringify({command: "SYNC", ids: missingIds}));
         }
-        catch(e) {
-            console.log("Failed to send post to " + message.src);
-        }
+    }
+    else if(msgData.command === "SEND-SYNC") {
+        console.log("SEND-SYNC command received from " + message.src);
+        await net.client.sendReply(message.src, message.dest, JSON.stringify({command: "SYNC", ids: postsStorage.getAllIds()}));
     }
     else {
-        console.log("Unknown command: " + command);
+        console.log("Message with unknown command received from " + message.src + ": " + message.payload);
     }
 }
 
 
-function getNewMessages() {
+async function getNewMessages() {
     const latest = postsStorage.getLatestPost();
-    net.sendToNeighbors("UPDT" + (latest ? latest : "0" * timeStampLength));
+    try {
+        await net.sendToNeighbors(JSON.stringify({command: "UPDATE", timestamp: latest ? latest.timestamp : 0, numPosts: postsStorage.posts.size}));
+    }
+    catch(e) {
+        console.log("Failed to send update request: " + e);
+    }
 }
 
 
 async function syncPosts() {
-    const allIds = postsStorage.getAllIds().join("");
-    const res = await net.sendToNeighbors("SYNC" + allIds);
-    // check if any of the neighbors received the message
-    return res && res.some(r => r.status === "success");
+    const allIds = postsStorage.getAllIds();
+    await net.sendToNeighbors(JSON.stringify({command: "SYNC", ids: allIds}));
 }
 
 
 async function setupChatInterface() {
+    console.log("Setting up chat interface");
+
     document.getElementById("message-input").addEventListener("keypress", function(event) {
         if (event.key === "Enter") {
             event.preventDefault(); // Prevent form submission
             let message = this.value.trim();
             if (message) {
-                net.broadcast("POST" + getFixedWidthTimestamp() + "|" + message);
+                net.broadcast(JSON.stringify({command: "POST", post: {text: message, timestamp: Date.now()}}));
                 this.value = ""; // Clear input field
             }
         }
     });
 
-    showPost({text: "Connecting...", timestamp: Date.now(), authorName: "System", id: "init-post"});
+    systemMessage("Connecting...");
 
-    if(await net.start())
-        showPost({text: "Loading posts...", timestamp: Date.now(), authorName: "System", id: "init-post"});
-    else {
-        showPost({text: "Failed to connect to the network. Refresh the page to try again.",
-            timestamp: Date.now(), authorName: "System", id: "init-post"});
+    try {
+        const nodes = await safeNodes.seedNodes();
+        if(await safeNodes.canConnectToUnsafeNodes(nodes))
+            net = new DchNet(null);
+        else {
+            systemMessage("Connecting to safe nodes only (may take a while)...");
+            net = new DchNet(nodes);
+        }
 
+        await net.start();
+        systemMessage("Loading posts...");
+    }
+    catch(e) {
+        console.log("Failed to connect to the network: " + e);
+        
+        systemMessage("Failed to connect to the network. Refresh the page to try again.");
         return;
+    }
+
+    try {
+        const timestamp = await net.client.getNodeTimestamp();
+        const timeDiff = Math.abs(Date.now() - timestamp);
+        if(timeDiff > 30000) {
+            systemMessage(`Your system clock is not synchronized (${Math.round(timeDiff / 1000)} seconds off). `
+                `The board will not work correctly. Please synchronize your system clock and refresh the page.`);
+
+            return;
+        }
+
+        console.log(`Time difference ok (${timeDiff} ms off)`);
+    }
+    catch(e) {
+        console.log("Failed to get node timestamp: " + e);
     }
 
     net.client.onMessage(messageReceivedCallback);        
@@ -136,26 +144,56 @@ async function setupChatInterface() {
     postsStorage.onPostRemoved(removePost);
 
     // try to sync posts on startup repeatedly
-    for(let i = 0; i < 10; i++)
-        if(await syncPosts()) {
+    var postsSynced = false;
+    for(let i = 0; i < 10; i++) {
+        try {
+            await syncPosts();
             console.log("Posts sync request sent successfully");
+            postsSynced = true;
+            systemMessage("You are not alone. Say hi!");
+            setTimeout(() => systemMessage(null), 3000);
             break;
         }
-        else {
-            const display = document.getElementById("chat-container");
-            const postElement = display.querySelector(`[data-id="init-post"] p`);
-            if (postElement)
-                postElement.textContent += ".";
-                    
+        catch(e) {
+            systemMessage(`Loading posts... (${i+1}/10)`)
             console.log("Failed to sync posts. Retrying..." + i);
         }
+    }
+
+    if(!postsSynced) {
+        systemMessage("Failed to load posts. Are you the first one here?");
+        setTimeout(() => systemMessage(null), 3000);
+    }
     
-    setInterval(syncPosts, 5*60*1000);  // sync posts every 5 minutes
+    setInterval(() => {
+        syncPosts().catch(e => console.log("Failed to sync posts: " + e));
+    }, 5*60*1000);  // sync posts every 5 minutes
 
     // get new messages every 30 seconds
     setInterval(getNewMessages, 30*1000);
-    
-    // net.broadcast("POST" + getFixedWidthTimestamp() + "|Hello, world! " + net.client.addr.substring(0, 8));
+
+    updateStatus();
+    setInterval(updateStatus, 5000);
+}
+
+
+function systemMessage(message, id="system-message") {
+    var msgElement = document.getElementById(id);
+    if (!msgElement) {
+        if(message === null)
+            return;
+
+        msgElement = document.createElement("div");
+        msgElement.id = id;
+        msgElement.classList.add("top-bar");
+        const logo = document.getElementById("logo");
+        logo.parentNode.insertBefore(msgElement, logo.nextSibling);
+    }
+
+    if(message === null)
+        msgElement.remove();
+    else
+        msgElement.textContent = message;
 }
 
 
@@ -179,7 +217,7 @@ function createPostElement(post) {
 
     const author = document.createElement("span");
     author.classList.add("author");
-    author.textContent = post.authorName;
+    author.textContent = "Frieren";
     postElement.appendChild(author);
 
     const time = new Date(Number(post.timestamp));
@@ -205,9 +243,6 @@ function createPostElement(post) {
 
 
 function showPost(post) {
-    // delete the initial message with id="init_post"
-    removePost("init-post");
-
     const display = document.getElementById("chat-container");
     const postElement = createPostElement(post);
 
@@ -236,6 +271,13 @@ function removePost(id) {
         return;
 
     postElement.remove();
+}
+
+
+function updateStatus() {
+    const statusElement = document.getElementById("status-bar");
+    const secsSincePing = net.lastPing ? Math.round((Date.now() - net.lastPing) / 1000) : "?";
+    statusElement.textContent = `${net.mode} - ${net.client.clients.length} peers - ${net.prevDests.length} addrs - ${secsSincePing}s since last ping`;
 }
 
 

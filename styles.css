@@ -47,6 +47,16 @@ body, html {
 }
 
 
+.top-bar {
+    background: #E04000;
+    text-align: center;
+    padding-top: 2px;
+    padding-bottom: 2px;
+    color: #FFFFFF;
+    width: 100%;
+}
+
+
 #message-input {
     padding: 10px;
     font-size: 16px;
@@ -63,4 +73,23 @@ body, html {
     font-size: 2em;
     color: #800000;
     width: 100%;
+}
+
+.status-bar {
+    text-align: right;
+    width: 95%;
+    padding-top: 2px;
+    padding-bottom: 2px;
+    font-size: 12px;
+    color: #800000;
+}
+
+
+.links-bar {
+    text-align: center;
+    width: 100%;
+    padding-top: 2px;
+    padding-bottom: 2px;
+    font-size: 12px;
+    color: #800000;
 }

@@ -1,34 +1,37 @@
-// peers are banned on a first-in-first-out basis for 5 minutes
-class BannedPeers {
+import * as random from "./random.js";
+import * as safeNodes from "./nkn_safe_nodes.js";
+
+// addresses are banned on a first-in-first-out basis for 5 minutes
+class BannedAddrs {
     static maxBannedPeers = 100;
     
     constructor() {
-        this.bannedPeers = new Map();
+        this.bannedAddrs = new Map();
     }
 
-    addBannedPeer(peer) {
-        if(this.bannedPeers.has(peer))
-            this.bannedPeers.delete(peer); // remove the peer from the banned list so it can be re-added with a new timestamp
+    addBannedAddr(addr) {
+        if(this.bannedAddrs.has(addr))
+            this.bannedAddrs.delete(addr); // remove the address from the banned list so it can be re-added with a new timestamp
         
-        // record the time the peer was banned
-        this.bannedPeers.set(peer, Date.now());
-        while(this.bannedPeers.size > BannedPeers.maxBannedPeers) {
-            const firstKey = this.bannedPeers.keys().next().value;  // Get the first (oldest) key
-            this.bannedPeers.delete(firstKey);  // Delete the element with the first key        
+        // record the time the address was banned
+        this.bannedAddrs.set(addr, Date.now());
+        while(this.bannedAddrs.size > BannedAddrs.maxBannedPeers) {
+            const firstKey = this.bannedAddrs.keys().next().value;  // Get the first (oldest) key
+            this.bannedAddrs.delete(firstKey);  // Delete the element with the first key        
         }
     }
 
-    removeBannedPeer(peer) {
-        this.bannedPeers.delete(peer);
+    removeBannedAddr(addr) {
+        this.bannedAddrs.delete(addr);
     }
 
-    isBanned(peer) {
-        if(!this.bannedPeers.has(peer))
+    isBanned(addr) {
+        if(!this.bannedAddrs.has(addr))
             return false;
 
-        const bannedTime = this.bannedPeers.get(peer);
+        const bannedTime = this.bannedAddrs.get(addr);
         if(Date.now() - bannedTime > 5*60*1000) {
-            this.bannedPeers.delete(peer);
+            this.bannedAddrs.delete(addr);
             return false;
         }
 
@@ -37,32 +40,39 @@ class BannedPeers {
 }
 
 
-class DchNet {
+export class DchNet {
     static topicStr = "dch_v1";
-    static topicHex = null;
+    static topicHex = nkn.hash.sha256Hex(DchNet.topicStr);
 
-    constructor() {
-        this.client = null;
-        this.onReceivedListeners = [];
-        this.bannedPeers = new BannedPeers();
+    constructor(safeNodesOnly) {
+        var generator = null;
+        if(safeNodesOnly) {
+            generator = safeNodes.safeNodeClientGenerator(safeNodesOnly);
+        }
+        else {
+            generator = retryClientGenerator(basicClientGenerator, 3);
+        }
+
+        this.client = new RedundantClient(generator, 3, DchNet.topicHex);
+        this.bannedAddrs = new BannedAddrs();
         this.prevDests = [];
+        this.lastPing = null;
+        this.mode = safeNodesOnly ? "safe" : "normal";
+
+        this.client.onMessage((message) => {
+            this.bannedAddrs.removeBannedAddr(message.src);
+            if(!this.client.isMyAddr(message.src))
+                this.lastPing = Date.now();
+        });
     }
 
     async start() {
-        if(!await this.#tryConnectRepeatedly(10))
-            return false;
-
-        DchNet.topicHex = await generateSHA256Hash(DchNet.topicStr);
-        // Subscribe to the topic evety 30 minutes for 30 minutes
-        this.#subscribe30Min();
-        setInterval(this.#subscribe30Min.bind(this), 30*60*1000);
-        this.client.onMessage((message) => { this.bannedPeers.removeBannedPeer(message.src); });
-        return true;
+        await this.client.start();
     }
 
     async broadcast(message) {
         try {
-            await this.client.publish(DchNet.topicHex, message, {txPool: true});
+            await this.client.publish(DchNet.topicHex, message);
             console.log("Broadcast successful");
         }
         catch (e) {
@@ -75,102 +85,186 @@ class DchNet {
         try {
             const subs = await this.client.getSubscribers(DchNet.topicHex, {txPool: true});
             notBanned = subs.subscribers.concat(subs.subscribersInTxPool).filter(
-                peer => peer != this.client.addr && !this.bannedPeers.isBanned(peer));
+                addr => !this.client.isMyAddr(addr) && !this.bannedAddrs.isBanned(addr));
         }
         catch (e) {
             console.log("Failed to get subscribers - using previous destinations. Error: " + e);
         }
 
         if(notBanned.length === 0)
-            return;
+            throw new Error("No neighbors to send to");
         
         this.prevDests = notBanned;
 
-        const dests = this.#sampleArraySecurely(notBanned, 3);
-        const sendPromises = dests.map(dest => {
-            return this.client.send(dest, message)
-                .then(() => {
-                    console.log("Sent to neighbor " + dest);
-                    return { dest, status: 'success' };
-                })
-                .catch(e => {
-                    console.log("Failed to send to neighbor " + dest);
-                    this.bannedPeers.addBannedPeer(dest);
-                    return { dest, status: 'failed' };
-                });
+        const dests = random.sampleArray(notBanned, 3);
+        const sendPromises = [];
+        // lambda captures dest correctly
+        for(const dest of dests) {
+            sendPromises.push(this.client.sendWithAny(dest, message).catch(e => {
+                console.log("Failed to send to neighbor " + dest);
+                this.bannedAddrs.addBannedAddr(dest);
+                throw e;
+            }));
+        }
+
+        return Promise.any(sendPromises);
+    }
+}
+
+
+function retryClientGenerator(baseGen, retries) {
+    return async function() {
+        for(let i = 0; i < retries; i++) {
+            try {
+                return await baseGen();
+            }
+            catch (e) {
+                console.log("Client creation failed: " + e);
+            }
+        }
+
+        throw new Error(`Failed to create client after ${retries} retries`);
+    }
+}
+
+
+function basicClientGenerator() {
+    return new Promise((resolve, reject) => {
+        const client = new nkn.Client({identifier: random.seed256(), tls: true});
+        client.onConnect(() => {
+            resolve(client);
         });
 
-        return Promise.all(sendPromises);
-    }
-
-    #waitForConnection() {
-        return new Promise((resolve, reject) => {
-            this.client.onConnect(() => {
-                resolve();  // Resolve the promise when the client connects
-            });
-
-            this.client.onConnectFailed((error) => {
-                reject(error);  // Reject the promise if there's an error
-            });
+        client.onConnectFailed((error) => {
+            reject(error);
         });
-    }    
+    });
+}
 
-    async #connectClient(tls) {
-        try {
-            this.client = new nkn.MultiClient({tls: tls});
-        }
-        catch (e) {
-            return false;
-        }
-    
-        try {
-            await this.#waitForConnection();
-            return true;
-        }
-        catch (e) {
-            return false;
-        }
-    }  
-    
-    async #tryConnectSecureOrNot() {
-        if(await this.#connectClient(false))
-            return true;
-    
-        if(await this.#connectClient(true))
-            return true;
-    
-        return false;
+
+class RedundantClient {
+    constructor(clientGenerator, targetClients, topic) {
+        this.clientGenerator = clientGenerator;
+        this.targetClients = targetClients;
+        this.clients = [];
+
+        this.onMessageListeners = [];
+        this.topic = topic;
     }
 
-    async #tryConnectRepeatedly(tries) {
-        for (let i = 0; i < tries; i++) {
-            if(await this.#tryConnectSecureOrNot())
-                return true;
-        }
-    
-        return false;
-    }    
+    // this will start the clients and return a promise that resolves when at least one client is started
+    // if all clients fail to start, the promise will reject
+    async start() {
+        const p = this.#fillRequredClients();
+        return p.then(() => {
+            // subscribe to the topic every 30 minutes
+            setInterval(this.#subscribe.bind(this), 30*60*1000);
 
-    #subscribe30Min() {
-        this.client.subscribe(DchNet.topicHex, 100);
-        console.log('Subscribed to topic: ' + DchNet.topicStr);
-    }    
+            // attempt to connect to the network every 5 minutes
+            setInterval(this.#fillRequredClients.bind(this), 5*60*1000);
+        });
+    }
 
-    #getRandomInt(max) {
-        const array = new Uint32Array(1);
-        window.crypto.getRandomValues(array);
-        return array[0] % max;
+    onMessage(listener) {
+        this.onMessageListeners.push(listener);
+    }
+
+    async publish(topic, message) {
+        return this.#trySequentiallyInRandomOrder(client => client.publish(topic, message, {txPool: true}));
+    }
+
+    async sendWithAny(dest, message) {
+        // send via one random client
+        const client = this.clients[random.getRandomInt(this.clients.length)];
+        await client.send(dest, message);
+        return true;
+    }
+
+    async sendReply(dest, ourAddr, message) {
+        for(const client of this.clients)
+            if(client.addr === ourAddr)
+                return await client.send(dest, message);
+
+        throw new Error("Client not found");
+    }
+
+    async getSubscribers(topic) {
+        return this.#trySequentiallyInRandomOrder(client => client.getSubscribers(topic, {txPool: true}));
+    }
+
+    isMyAddr(addr) {
+        return this.clients.some(client => client.addr === addr);
+    }
+
+    async getNodeTimestamp() {
+        var timestamp = null;
+        await this.#trySequentiallyInRandomOrder(async client => {
+            const addr = 'https://' + client.node.rpcAddr;
+            const nodeState = await nkn.rpc.getNodeState({rpcServerAddr: addr});
+            timestamp = nodeState.currTimeStamp * 1000;
+        });
+
+        if(timestamp === null)
+            throw new Error("Failed to get timestamp");
+
+        return timestamp;
     }
     
-    #sampleArraySecurely(array, n) {
-        if(n >= array.length)
-            return array.slice(); // Return a copy of the array
+    async #subscribe() {
+        try {
+            const promises = [];
+            for(const client of this.clients)
+                promises.push(client.subscribe(this.topic, 100, client.identifier));
 
-        let result = array.slice(); // Create a copy of the array
-        for (let i = 0; i < n; i++) {
-            const j = i + this.#getRandomInt(array.length - i); // Get a random index from i to array.length - 1
-            [result[i], result[j]] = [result[j], result[i]]; // Swap elements
+            await Promise.all(promises);
         }
-        return result.slice(0, n); // Return the first n elements
+        catch (e) {
+            console.log("Some clients failed to subscribe: " + e);
+        }
+    }
+
+    #newClient(client) {
+        console.log("New client started: " + client.addr);
+        this.clients.push(client);
+        client.subscribe(this.topic, 100, client.identifier);
+        client.onMessage((message) => {
+            message.dest = client.addr;
+            for (const listener of this.onMessageListeners)
+                listener(message);
+        });
+
+        client.onWsError((error) => {
+            this.clients = this.clients.filter(c => c !== client);
+            client.close();
+            if(this.clients.length < this.targetClients)
+                this.clientGenerator().then(client => { this.#newClient(client); });
+        })
+    }
+
+    async #trySequentiallyInRandomOrder(func) {
+        const indexes = Array.from(Array(this.clients.length).keys());
+        random.shuffleArray(indexes);
+
+        for (const i of indexes) {
+            try {
+                return await func(this.clients[i]);
+            }
+            catch (e) {
+            }
+        }
+
+        throw new Error("Failed to perform operation");
+    }
+
+    async #fillRequredClients() {
+        const neededClients = this.targetClients - this.clients.length;
+        if(neededClients <= 0)
+            return;
+
+        const promises = [];
+        for(let i = 0; i < neededClients; i++)
+            promises.push(this.clientGenerator().then(client => { this.#newClient(client); return true; }));
+
+        await Promise.any(promises);
     }
 }

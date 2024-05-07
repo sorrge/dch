@@ -25,13 +25,15 @@
     <link rel="manifest" href="images/site.webmanifest">    
 </head>
 <body id="whole-page">
-    <div class="logo">dch</div>
+    <div class="logo" id="logo">dch</div>
     <div id="chat-container">
         <input type="text" id="message-input" data-timestamp="99999999999999999999" placeholder="Type your message here...">
     </div>
-    <script src="lib/nkn.js"></script> <!-- NKN library script -->
-    <script src="posts_storage.js"></script>
-    <script src="network.js"></script>
-    <script src="chat.js"></script>
+    <div class="links-bar"><a href="https://github.com/sorrge/dch" target="_blank" rel="noopener noreferrer">GitHub</a> -
+        <a href="https://nkn.org/" target="_blank" rel="noopener noreferrer">NKN</a></div>
+    <div id="status-bar" class="status-bar">starting up</div>
+    <script defer src="lib/nkn.js"></script>
+    <script defer src="lib/rbtree.min.js"></script>
+    <script type="module" src="chat.js"></script>
 </body>
 </html>

@@ -63,7 +63,7 @@ class PriorityQueue {
 
 
 
-class PostsStorage {
+export class PostsStorage {
     static maxPosts = 200;
     static maxPostLength = 10000;
 
@@ -75,6 +75,18 @@ class PostsStorage {
     addPost(post) {
         if(post.text.length > PostsStorage.maxPostLength)
             return;
+
+        // check that the post has required fields and only those fields
+        if(!post.text || !post.timestamp || Object.keys(post).length !== 2) {
+            return;
+        }
+
+        // check that the timestamp is a number and is not more than 30s in the future
+        if(isNaN(Number(post.timestamp)) || Number(post.timestamp) > Date.now() + 30000) {
+            return;
+        }
+
+        post.id = nkn.hash.sha256Hex(post.text + "|" + post.timestamp);        
         
         if(this.posts.add(post.id, post, Number(post.timestamp)))
             for(const listener of this.onPostAddedListeners)
