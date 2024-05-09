@@ -130,14 +130,29 @@ async function findSafeNodeRepeatedly(nodes, pubkey, maxTries=50) {
 }
 
 
+export function waitForClientToConnect(client) {
+    return new Promise((resolve, reject) => {
+        client.onConnect(() => {
+            resolve(client);
+        });
+
+        client.onConnectFailed((error) => {
+            reject(error);
+        });
+    });
+}
+
+
 export function safeNodeClientGenerator(nodes) {
     return async function() {
         const key = new nkn.Key();
         const pubkey = key.publicKey;
         const identifier = await findSafeNodeRepeatedly(nodes, pubkey);
-        return new nkn.Client({
+        const client = new nkn.Client({
             identifier: identifier,
             seed: key.seed});
+
+        return await waitForClientToConnect(client);
     };
 }
 

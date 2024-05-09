@@ -128,17 +128,9 @@ function retryClientGenerator(baseGen, retries) {
 }
 
 
-function basicClientGenerator() {
-    return new Promise((resolve, reject) => {
-        const client = new nkn.Client({identifier: random.seed256(), tls: true});
-        client.onConnect(() => {
-            resolve(client);
-        });
-
-        client.onConnectFailed((error) => {
-            reject(error);
-        });
-    });
+async function basicClientGenerator() {
+    const client = new nkn.Client({identifier: random.seed256(), tls: true});
+    return await safeNodes.waitForClientToConnect(client);
 }
 
 
